@@ -32,17 +32,41 @@ GREET_HINTS = (
 def _rule_intent(text: str) -> Optional[Intent]:
     t = text.lower().strip()
 
-    decision_words = ("let's", "lets", "go with", "go for", "choose", "pick", "i'll take", "ill take", "get me", "upgrade")
-    if any(w in t for w in decision_words) and ("pro" in t):
+    # Strong decision / commitment phrases → HIGH INTENT
+    decision_phrases = (
+        "i want to take",
+        "i want to go with",
+        "go with",
+        "let's go with",
+        "lets go with",
+        "i'll take",
+        "ill take",
+        "take the",
+        "choose",
+        "pick",
+        "sign me up",
+        "get me",
+        "upgrade to",
+        "switch to",
+    )
+
+    if any(p in t for p in decision_phrases):
         return "High-intent lead (ready to sign up)"
 
+    # Explicit high-intent hints
     if any(h in t for h in HIGH_INTENT_HINTS):
         return "High-intent lead (ready to sign up)"
+
+    # Product / pricing inquiry
     if any(h in t for h in PRODUCT_HINTS):
         return "Product / pricing inquiry"
+
+    # Greeting / exit
     if any(t == h or t.startswith(h + " ") for h in GREET_HINTS):
         return "Casual greeting"
+
     return None
+
 
 
 def classify_intent(user_text: str, model=None) -> Intent:
