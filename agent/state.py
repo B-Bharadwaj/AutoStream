@@ -11,6 +11,7 @@ class LeadDetails(BaseModel):
     name: Optional[str] = None
     email: Optional[str] = None
     platform: Optional[str] = None
+    plan: Optional[str] = None 
 
 
 class Message(BaseModel):

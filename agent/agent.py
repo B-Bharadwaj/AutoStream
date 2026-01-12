@@ -1,5 +1,5 @@
 from __future__ import annotations
-
+import re
 from pathlib import Path
 from typing import Any, Dict
 
@@ -30,6 +30,49 @@ Hard rules:
   - Collect: name -> email -> platform
   - Call tool ONLY once after all three are collected.
 """
+
+
+EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
+
+PLATFORM_KEYWORDS = {
+    "youtube": "YouTube",
+    "instagram": "Instagram",
+    "insta": "Instagram",
+    "tiktok": "TikTok",
+    "twitter": "Twitter/X",
+    "x": "Twitter/X",
+}
+
+def extract_lead_fields(text: str) -> dict:
+    t = text.lower()
+
+    # email
+    email = None
+    m = EMAIL_RE.search(text)
+    if m:
+        email = m.group(0)
+
+    # platform
+    platform = None
+    for k, v in PLATFORM_KEYWORDS.items():
+        if re.search(rf"\b{k}\b", t):
+            platform = v
+            break
+
+    # plan
+    plan = None
+    if "pro" in t:
+        plan = "Pro"
+    elif "basic" in t:
+        plan = "Basic"
+
+    # name (simple heuristic: "my name is X" / "i am X")
+    name = None
+    m = re.search(r"(my name is|i am|i'm)\s+([a-zA-Z][a-zA-Z\s]{1,30})", text, re.IGNORECASE)
+    if m:
+        name = m.group(2).strip()
+
+    return {"name": name, "email": email, "platform": platform, "plan": plan}
 
 
 def should_use_formatter(user_text: str) -> bool:
@@ -194,28 +237,107 @@ def build_app(kb_path: str = "data/knowledge_base.json"):
     def node_high_intent_router(state: AgentState) -> Dict[str, Any]:
         """
         Start or continue a gated lead-capture flow.
+
+        Upgrade:
+        - Supports users providing platform/email in the same message as plan intent,
+        e.g., "I want the pro plan for instagram" (platform is prefilled).
+        - Keeps the original flow intact (still collects name -> email -> platform),
+        but skips asking for fields already captured.
         """
+        import re
+
+        EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
+        PLATFORMS = ["youtube", "instagram", "tiktok", "twitter", "x"]
+
+        def extract_quick_lead(text: str) -> dict:
+            t = text.lower()
+
+            # Email
+            email = None
+            m = EMAIL_RE.search(text)
+            if m:
+                email = m.group(0)
+
+            # Platform
+            platform = None
+            for p in PLATFORMS:
+                if re.search(rf"\b{p}\b", t):
+                    platform = "Twitter/X" if p == "x" else p.capitalize()
+                    break
+
+            # Plan (optional: only used if you add lead.plan to state.py)
+            plan = None
+            if "pro" in t:
+                plan = "Pro"
+            elif "basic" in t:
+                plan = "Basic"
+
+            return {"email": email, "platform": platform, "plan": plan}
+
         if state.lead_capture_done:
             msg = "You’re already set — I’ve captured your details. Anything else you want to know about AutoStream?"
             return {"history": state.history + [Message(role="assistant", content=msg)]}
 
-        # If we are not currently awaiting a field, start with name.
+        user_text = state.user_input.strip()
+
+        # If we are not currently awaiting a field, we may still want to prefill from this message
         if state.awaiting_field is None:
+            extracted = extract_quick_lead(user_text)
+
+            # Prefill if present (does NOT break original flow)
+            if extracted.get("email") and not state.lead.email:
+                state.lead.email = extracted["email"]
+            if extracted.get("platform") and not state.lead.platform:
+                state.lead.platform = extracted["platform"]
+
+            # OPTIONAL: store chosen plan if you added lead.plan in state.py
+            # if extracted.get("plan") and getattr(state.lead, "plan", None) is None:
+            #     state.lead.plan = extracted["plan"]
+
             return {
+                "lead": state.lead,
                 "awaiting_field": "name",
                 "history": state.history
                 + [Message(role="assistant", content="Awesome — I can help you get started. What’s your name?")],
             }
 
-        value = state.user_input.strip()
+        value = user_text  # the user's current input, used as candidate field value
 
         # Name
         if state.awaiting_field == "name":
+            # Also allow prefilling email/platform if user typed them along with name
+            extracted = extract_quick_lead(value)
+            if extracted.get("email") and not state.lead.email:
+                state.lead.email = extracted["email"]
+            if extracted.get("platform") and not state.lead.platform:
+                state.lead.platform = extracted["platform"]
+
             if len(value) < 2:
                 msg = "Could you share your name (just a couple characters is fine)?"
                 return {"history": state.history + [Message(role="assistant", content=msg)]}
 
             state.lead.name = value
+
+            # If email already captured earlier, skip asking email
+            if state.lead.email:
+                # If platform already captured too, we can execute tool immediately
+                if state.lead.platform and not state.lead_capture_done:
+                    mock_lead_capture(state.lead.name, state.lead.email, state.lead.platform)
+                    msg = "Perfect — you’re all set ✅ I’ve captured your details and someone from AutoStream will reach out shortly."
+                    return {
+                        "lead": state.lead,
+                        "lead_capture_done": True,
+                        "awaiting_field": None,
+                        "history": state.history + [Message(role="assistant", content=msg)],
+                    }
+
+                return {
+                    "lead": state.lead,
+                    "awaiting_field": "platform",
+                    "history": state.history
+                    + [Message(role="assistant", content="Nice to meet you! Which creator platform are you on (YouTube, Instagram, TikTok, etc.)?")],
+                }
+
             return {
                 "lead": state.lead,
                 "awaiting_field": "email",
@@ -224,11 +346,30 @@ def build_app(kb_path: str = "data/knowledge_base.json"):
 
         # Email
         if state.awaiting_field == "email":
-            if not is_valid_email(value):
+            extracted = extract_quick_lead(value)
+            candidate_email = extracted.get("email") or value
+
+            # Also allow capturing platform early if present
+            if extracted.get("platform") and not state.lead.platform:
+                state.lead.platform = extracted["platform"]
+
+            if not is_valid_email(candidate_email):
                 msg = "That email doesn’t look valid. Can you re-check and send it again?"
                 return {"history": state.history + [Message(role="assistant", content=msg)]}
 
-            state.lead.email = value
+            state.lead.email = candidate_email
+
+            # If platform already captured earlier, execute tool now
+            if state.lead.platform and state.lead.name and not state.lead_capture_done:
+                mock_lead_capture(state.lead.name, state.lead.email, state.lead.platform)
+                msg = "Perfect — you’re all set ✅ I’ve captured your details and someone from AutoStream will reach out shortly."
+                return {
+                    "lead": state.lead,
+                    "lead_capture_done": True,
+                    "awaiting_field": None,
+                    "history": state.history + [Message(role="assistant", content=msg)],
+                }
+
             return {
                 "lead": state.lead,
                 "awaiting_field": "platform",
@@ -238,11 +379,14 @@ def build_app(kb_path: str = "data/knowledge_base.json"):
 
         # Platform
         if state.awaiting_field == "platform":
-            if len(value) < 2:
+            extracted = extract_quick_lead(value)
+            platform_value = extracted.get("platform") or value
+
+            if len(platform_value) < 2:
                 msg = "Which platform do you mainly create on? (e.g., YouTube / Instagram / TikTok)"
                 return {"history": state.history + [Message(role="assistant", content=msg)]}
 
-            state.lead.platform = value
+            state.lead.platform = platform_value
 
             # Strict gating: tool executes only if all fields exist and tool not yet executed.
             if (state.lead.name and state.lead.email and state.lead.platform) and not state.lead_capture_done:
