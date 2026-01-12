@@ -7,7 +7,7 @@ Production-style Conversational AI Agent for a fictional SaaS product **AutoStre
 - **State management** (multi-turn memory) via **LangGraph**
 - **Strict gated tool execution** for lead capture (name → email → platform → tool call)
 
-This is not a basic chatbot. The system behaves like a deployable agent workflow: it routes messages through a state machine, retains conversation context across turns, and executes backend actions only when conditions are met.
+This is a production-style agent workflow, not a prompt-based chatbot.
 
 ---
 
@@ -106,7 +106,7 @@ State is managed via a typed Pydantic schema (`AgentState`) that persists conver
 
 ## State Management (Memory)
 
-The agent stores:
+### The agent stores:
 
 - `history`: message list (user + assistant)
 - `intent`: one of the 3 intents
@@ -122,6 +122,16 @@ This is what enables multi-turn behavior like:
 - User asks refund policy mid-flow
 - Agent answers refund policy
 - Resume signup without losing progress
+
+### Smart Lead Capture & State Gating
+The agent supports both step-by-step lead collection and single-message extraction (e.g., “I want the Pro plan for Instagram”).  
+If email or platform details are mentioned early, they are prefilled without breaking the gated flow.  
+A LangGraph state machine strictly controls the order of data collection (name → email → platform).  
+The lead capture tool is executed exactly once and only after all required fields are present.
+
+### Optimized LLM Usage
+Pricing, features, and policy responses are generated strictly from retrieved knowledge base content (RAG).  
+LLM calls are intentionally minimized to intent classification and optional response phrasing for production reliability.
 
 ---
 
@@ -202,7 +212,26 @@ export GOOGLE_API_KEY="YOUR_KEY"
 ```python
 python -m agent.main
 ```
+
+## Example Conversation Flow
+User: hi  
+Agent: greeting  
+
+User: pricing  
+Agent: answers via RAG  
+
+User: I want to go with the pro plan  
+Agent: detects high-intent  
+
+User: user  
+User: user@gmail.com  
+User: instagram  
+
+Tool Output:
+Lead captured successfully: user, user@gmail.com, instagram
+
 ---
+
 ## WhatsApp / Social Platform Integration (Webhook Design)
 
 This agent is designed to integrate cleanly with **WhatsApp, Instagram DMs, or web chat** using **webhooks**, without modifying the core agent logic.
